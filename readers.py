@@ -3,11 +3,12 @@ import os
 import json
 import numpy as np
 
+from collections import OrderedDict
 from functools import lru_cache
 from sklearn.preprocessing import label_binarize
 
 from allennlp.data import Instance
-from allennlp.data.fields import TextField, ListField, MetadataField, ArrayField, MultiLabelField
+from allennlp.data.fields import TextField, ListField, MetadataField, ArrayField, IndexField
 from allennlp.data.dataset_readers import DatasetReader
 from allennlp.data.token_indexers import PretrainedBertIndexer, SingleIdTokenIndexer
 from allennlp.data.tokenizers.word_splitter import BertBasicWordSplitter
@@ -84,7 +85,7 @@ class DialogueReader(DatasetReader):
         self.files_limit = limit
         self.token_indexers = {"tokens": PretrainedBertIndexer("bert-base-uncased")}
         self.tokenizer = BertBasicWordSplitter()
-        self.schema = None
+        self.schemas = None
 
     def _read(self, files_path):
         self.schemas = SchemaList(os.path.join(files_path, "schema.json"))
@@ -95,107 +96,111 @@ class DialogueReader(DatasetReader):
                     for d in dialogs:
                         yield self.text_to_instance(d)
 
-    def to_text_field(self, sent):
+    def text_field(self, sent):
         tokens = self.tokenizer.split_words(sent)
         return TextField(tokens, self.token_indexers)
 
-    def to_speaker_field(self, turnid, dialogue, info):
-        return self.to_text_field(dialogue["turns"][turnid]["speaker"])
+    def field_dialogue_id(self, dialogue):
+        return MetadataField(dialogue["dialogue_id"])
+
+    def field_turn_speaker(self, turnid, dialogue):
+        return self.text_field(dialogue["turns"][turnid]["speaker"])
     
-    def to_utter_field(self, turnid, dialogue, info):
-        return self.to_text_field(dialogue["turns"][turnid]["utterance"])
+    def field_turn_utter(self, turnid, dialogue):
+        return self.text_field(dialogue["turns"][turnid]["utterance"])
     
-    def to_sys_utter_field(self, turnid, dialogue, info):
+    def field_turn_sys_utter(self, turnid, dialogue):
         turn = dialogue["turns"][turnid]
         if turn["speaker"] == "SYSTEM":
-            return self.to_text_field(dialogue["turns"][turnid]["utterance"])
+            return self.text_field(dialogue["turns"][turnid]["utterance"])
         
-    def to_usr_utter_field(self, turnid, dialogue, info):
+    def field_turn_usr_utter(self, turnid, dialogue):
         turn = dialogue["turns"][turnid]
         if turn["speaker"] == "USER":
-            return self.to_text_field(dialogue["turns"][turnid]["utterance"])
+            return self.text_field(dialogue["turns"][turnid]["utterance"])
 
-    def to_service_name_field(self, turnid, dialogue, info):
-        turn = dialogue["turns"][turnid]
-        if turn["speaker"] == "USER":
-            return MetadataField([
-                x["service"] for x in turn["frames"]
-            ])
+    def field_service(self, dialogue):
+        return MetadataField(dialogue["services"])
 
-    def to_service_desc_field(self, turnid, dialogue, info):
+    def field_service_desc(self, dialogue):
+        desc_list = []
+        for service in dialogue["services"]:
+            desc =  self.schemas.get_service_desc(service)
+            desc_list.append(self.text_field(desc))
+        return ListField(desc_list)
+
+    def field_turn_service_exist(self, turnid, dialogue):
         turn = dialogue["turns"][turnid]
-        if turn["speaker"] == "USER":
-            service_desc = []
-            for frame in turn["frames"]:
-                d =  self.schemas.get_service_desc(frame["service"])
-                service_desc.append(self.to_text_field(d))
-            return ListField(service_desc)
+        services = dialogue["services"]
+        # order frames by dialog.services list, to establish one to one mappings across fields
+        frames = sorted(turn["frames"], key=lambda x: services.index(x["service"]))
+        exists_onehot = label_binarize([f["service"] for f in frames], classes=services)
+        return ArrayField(exists_onehot)
         
-    def to_intent_name_field(self, turnid, dialogue, info):
+    def field_intent(self, dialogue):
+        # NOTE: we might want to copy these lists, because if they are changed in an epoch,
+        # the next epoch will not retain the changes
+        intent_list = [self.schemas.get(s)["intent_name"] for s in dialogue["services"]]
+        return MetadataField(intent_list)
+
+    def field_intent_desc(self, dialogue):
+        desc_list = []
+        for service in dialogue["services"]:
+            desc = [self.text_field(d) for d in self.schemas.get(service)["intent_desc"]]
+            desc_list.append(ListField(desc))
+        return ListField(desc_list)
+
+    def field_turn_intent_exist(self, turnid, dialogue):
         turn = dialogue["turns"][turnid]
         if turn["speaker"] == "USER":
-            return MetadataField([
-                x["state"]["active_intent"] for x in turn["frames"]
-            ])
-    
-    def to_intent_desc_field(self, turnid, dialogue, info):
-        turn = dialogue["turns"][turnid]
-        if turn["speaker"] == "USER":
-            intent_desc = []
+            # maintain order of services: service -> onehot
+            exists_onehot = OrderedDict()
+            for service in dialogue["services"]:
+                exists_onehot[service] = None
+            
+            # fill encodings of existing services
             for frame in turn["frames"]:
                 service = frame["service"]
+                all_intents = self.schemas.get(service)["intent_name"]
                 intent = frame["state"]["active_intent"]
-                d = self.schemas.get_intent_desc(service, intent)
-                intent_desc.append(self.to_text_field(d or "NONE"))
-            return ListField(intent_desc)
-    
-    def to_intent_exist_field(self, turnid, dialogue, info):
-        turn = dialogue["turns"][turnid]
-        if turn["speaker"] == "USER":
-            intent_exist = [] # across service
-            for frame in turn["frames"]:
-                service = frame["service"]
-                intent = frame["state"]["active_intent"]
-                encoding = label_binarize([intent], classes=info["each"][service]["intent_name"])
-                intent_exist.append(ArrayField(encoding))
-            return ListField(intent_exist)
-    
-    def to_all_intent_exist_field(self, turnid, dialogue, info):
-        turn = dialogue["turns"][turnid]
-        if turn["speaker"] == "USER":
-            intent_exist = [] # across service
-            for frame in turn["frames"]:
-                intent = frame["state"]["active_intent"]
-                encoding = label_binarize([intent], classes=info["all"]["intent_name"])
-                intent_exist.append(encoding)
-            intent_exist = np.concatenate(intent_exist)
-            return ArrayField(intent_exist)
+                encoding = label_binarize([intent], classes=all_intents)[0]
+                exists_onehot[service] = ArrayField(encoding)
+            
+            # fill with empty encodings for remaining
+            for service in exists_onehot:
+                if exists_onehot[service] is None:
+                    all_intents = self.schemas.get(service)["intent_name"]
+                    encoding = np.array([0] * len(all_intents))
+                    exists_onehot[service] = ArrayField(encoding)
 
-    def to_all_service_exist_field(self, turnid, dialogue, info):
-        turn = dialogue["turns"][turnid]
-        if turn["speaker"] == "USER":
-            all_service_exist = []
-            for frame in turn["frames"]:
-                encoding = label_binarize([frame["service"]], classes=info["all"]["service_name"])
-                all_service_exist.append(encoding)
-            all_service_exist = np.concatenate(all_service_exist)
-            return ArrayField(all_service_exist)
+            return ListField(list(exists_onehot.values()))
+
+    def field_slots(self, dialogue):
+        slot_list = []
+        for service in dialogue["services"]:
+            slots = self.schemas.get(service)["slot_name"]
+            slot_list.append(slots)
+        return MetadataField(slot_list)
+
+    def field_slots_desc(self, dialogue):
+        desc_list = []
+        for service in dialogue["services"]:
+            desc = [self.text_field(d) for d in self.schemas.get(service)["slot_desc"]]
+            desc_list.append(ListField(desc))
+        return ListField(desc_list)
+
+    def field_slots_iscat(self, dialogue):
+        # TODO: use IndexField here?
+        iscat_list = []
+        for service in dialogue["services"]:
+            iscat = np.array([int(i) for i in self.schemas.get(service)["slot_iscat"]])
+            iscat_list.append(ArrayField(iscat))
+        return ListField(iscat_list)
 
     def text_to_instance(self, dialogue):
-        # schema info
-        info = {
-            "each": {}, # by service name
-            "all": {},  # services merged by fields
-        }
-        for service in dialogue["services"]:
-            info["each"][service] = self.schemas.get(service)
-            for k, v in info["each"][service].items():
-                info["all"][k] = info["all"].get(k, [])
-                info["all"][k].extend(v)
-
-        # add turn level fields
+        # initialize turn fields with list, dialog level fields with None
         fields = dict(
-            dialogue_id=MetadataField(dialogue["dialogue_id"]),
+            dialogue_id=None,
 
             # messages
             speaker=[], # [Batch, Turn]
@@ -203,57 +208,39 @@ class DialogueReader(DatasetReader):
             sys_utter=[], # [Batch, Turn, Tokens]
             usr_utter=[], # [Batch, Turn, Tokens]
 
-            # turn services
-            service=[], # [Batch, Service] all dialog services
-            service_desc=[], # [Batch, Service, Tokens] service descriptions
-            frames_service_exist=[], # [Batch, Turn, Service, Service] one hot
+            # services
+            service=None, # [Batch, Service] all dialog services
+            service_desc=None, # [Batch, Service, Tokens] service descriptions
+            service_exist=[], # [Batch, Turn, Service, Service] one hot
             
-            # frame intents
-            intent=[], # [Batch, Service, Intent]
-            intent_desc=[], # [Batch, Service, Intent, Tokens]
-            frames_intent_exist=[], # [Batch, Turn, Service, Intent, Intent]
+            # intents
+            intent=None, # [Batch, Service, Intent]
+            intent_desc=None, # [Batch, Service, Intent, Tokens]
+            intent_exist=[], # [Batch, Turn, Service, Intent, Intent]
 
-            # state slots
-            slots=[], # [Batch, Service, Slot]
-            slots_desc=[], # [Batch, Service, Slot, Tokens]
-            frames_slotreq=[], # [Batch, Turn, Service, Slot, Slot]
-            frames_slotval=[], # [Batch, Turn, Slot, Value, Tokens]
+            # # state slots
+            slots=None, # [Batch, Service, Slot]
+            slots_desc=None, # [Batch, Service, Slot, Tokens]
+            slots_iscat=None, # [Batch, Service, Slot]
         )
 
-
-        fields = dict(
-            speaker=[],
-            utter=[],
-            sys_utter=[],
-            usr_utter=[],
-
-            intent_name=[],
-            intent_desc=[],
-            intent_exist=[],  # one hot encoding across service
-
-            # These two are probably not useful, but leaving here..
-            service_name=[],
-            service_desc=[],
-
-            all_intent_exist=[], # one hot encoding across all services in dialog
-            all_service_exist=[], # one hot encoding across all services in dialog
-        )
-        
-        # get turn level info
+        # fill turn level fields
         for turnid in range(len(dialogue["turns"])):
             for name in fields:
-                value = getattr(self, f"to_{name}_field")(turnid, dialogue, info)
+                if type(fields[name]) is list:
+                    value = getattr(self, f"field_turn_{name}")(turnid, dialogue)
+                    if value is not None:
+                        fields[name].append(value)
+        
+        for name in fields:
+            if type(fields[name]) is list:
+                fields[name] = ListField(fields[name])
+
+        # fill dialog level fields
+        for name in fields:
+            if fields[name] is None:
+                value = getattr(self, f"field_{name}")(dialogue)
                 if value is not None:
-                    fields[name].append(value)
+                    fields[name] = value
         
-        # add dialogue level fields
-        fields["all_service_name"] = [MetadataField(i) for i in info["all"]["service_name"]]
-        fields["all_service_desc"] = [self.to_text_field(i) for i in info["all"]["service_desc"]]
-        fields["all_intent_name"] = [MetadataField(i) for i in info["all"]["intent_name"]]
-        fields["all_intent_desc"] = [self.to_text_field(i) for i in info["all"]["intent_desc"]]
-        
-        # fields..
-        for f in fields:
-            fields[f] = ListField(fields[f])
-            
         return Instance(fields)
