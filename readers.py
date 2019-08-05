@@ -77,7 +77,7 @@ class SchemaList(object):
         return result    
 
 
-class DialogueDatasetReader(DatasetReader):
+class DialogueReader(DatasetReader):
 
     def __init__(self, limit=float("inf"), lazy=False):
         super().__init__(lazy)
@@ -194,6 +194,33 @@ class DialogueDatasetReader(DatasetReader):
                 info["all"][k].extend(v)
 
         # add turn level fields
+        fields = dict(
+            dialogue_id=MetadataField(dialogue["dialogue_id"]),
+
+            # messages
+            speaker=[], # [Batch, Turn]
+            utter=[], # [Batch, Turn, Tokens]
+            sys_utter=[], # [Batch, Turn, Tokens]
+            usr_utter=[], # [Batch, Turn, Tokens]
+
+            # turn services
+            service=[], # [Batch, Service] all dialog services
+            service_desc=[], # [Batch, Service, Tokens] service descriptions
+            frames_service_exist=[], # [Batch, Turn, Service, Service] one hot
+            
+            # frame intents
+            intent=[], # [Batch, Service, Intent]
+            intent_desc=[], # [Batch, Service, Intent, Tokens]
+            frames_intent_exist=[], # [Batch, Turn, Service, Intent, Intent]
+
+            # state slots
+            slots=[], # [Batch, Service, Slot]
+            slots_desc=[], # [Batch, Service, Slot, Tokens]
+            frames_slotreq=[], # [Batch, Turn, Service, Slot, Slot]
+            frames_slotval=[], # [Batch, Turn, Slot, Value, Tokens]
+        )
+
+
         fields = dict(
             speaker=[],
             utter=[],

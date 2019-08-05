@@ -3,13 +3,13 @@ from allennlp.data import Vocabulary
 from allennlp.data.iterators import BucketIterator, BasicIterator
 from allennlp.training.trainer import Trainer
 
-from readers import DialogueDatasetReader
+from readers import DialogueReader
 from models import UserIntentPredictor
 
 import torch.optim as optim
 
 # read data
-reader = DialogueDatasetReader(limit=5)
+reader = DialogueReader(limit=5)
 train_dataset = reader.read("data/train") 
 
 # build the vocab
