@@ -2,3 +2,6 @@
 .vscode
 __pycache__
 data
+*.out
+*.log
+.ipynb_checkpoints/

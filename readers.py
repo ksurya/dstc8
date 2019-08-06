@@ -218,7 +218,7 @@ class DialogueReader(DatasetReader):
             intent_desc=None, # [Batch, Service, Intent, Tokens]
             intent_exist=[], # [Batch, Turn, Service, Intent, Intent]
 
-            # # state slots
+            # state slots
             slots=None, # [Batch, Service, Slot]
             slots_desc=None, # [Batch, Service, Slot, Tokens]
             slots_iscat=None, # [Batch, Service, Slot]
