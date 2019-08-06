@@ -8,29 +8,35 @@ import logging
 from models import UserIntentPredictor
 from readers import DialogueReader
 
-def trainer(model, optim, iterator, train_dataset, num_epochs, cuda_device, print_every):
+
+def to_model(obj):
+    if isinstance(obj, torch.nn.DataParallel):
+        return obj.module
+    return obj
+
+
+def trainer(model, optim, iterator, train_dataset, num_epochs, device, print_every):
     counter = 0
-    device = ("cuda" if torch.cuda.is_available()
-              and cuda_device != -1 else "cpu")
     model = model.to(device)
     model = torch.nn.DataParallel(model)
+    model.train()
+    counter = 0
     for epoch in range(num_epochs):
-        # train
         for batch in iterator(train_dataset):
-            batch = move_to_device(batch, cuda_device)
             counter += 1
-            turns = batch["usr_utter"]["tokens"].shape[1]
-            dialog_loss = 0
-            for turnid in range(turns):
+            batch = move_to_device(batch, 0)
+            num_turns = batch["usr_utter"]["tokens"].shape[1]
+            metrics = {"loss": 0, "acc": 0}
+            for turnid in range(num_turns):
                 optim.zero_grad()
                 output = model(turnid, batch)
-                if isinstance(model, torch.nn.DataParallel):
-                    output["loss"] = output["loss"].mean()
+                output["loss"] = output["loss"].mean()
                 output["loss"].backward()
-                dialog_loss += output["loss"].item()
+                metrics["loss"] += output["loss"].item()
+            metrics["acc"] = to_model(model).get_metrics(reset=True)["accuracy"]
             if counter % print_every == 0:
-                print("Iteration: {}, Epoch: {}, Loss: {}".format(
-                    epoch, counter, dialog_loss))
+                print("Iteration: {}, Epoch: {}, Loss: {}, Acc: {}".format(
+                    epoch, counter, metrics["loss"], metrics["acc"]))
 
 
 if __name__ == "__main__":
@@ -52,6 +58,6 @@ if __name__ == "__main__":
         iterator=iterator,
         train_dataset=train_ds,
         num_epochs=10,
-        cuda_device=0,
+        device="cuda",
         print_every=10
     )
