@@ -5,13 +5,38 @@ import numpy as np
 
 from collections import OrderedDict
 from functools import lru_cache
-from sklearn.preprocessing import label_binarize
 
 from allennlp.data import Instance
 from allennlp.data.fields import TextField, ListField, MetadataField, ArrayField, IndexField, Field
 from allennlp.data.dataset_readers import DatasetReader
 from allennlp.data.token_indexers import PretrainedBertIndexer, SingleIdTokenIndexer
 from allennlp.data.tokenizers.word_splitter import BertBasicWordSplitter
+
+
+def label_binarize(labels, classes):
+    # labels: np.array or tensor [batch, classes]
+    # classes: [..] list of classes
+    # weirdly,`sklearn.preprocessing.label_binarize` returns [1] or [0]
+    # instead of onehot ONLY when executing in this script!
+    vectors = [np.zeros(len(classes)) for _ in classes]
+    for i, label in enumerate(labels):
+        for j, c in enumerate(classes):
+            if c == label:
+                vectors[i][j] = 1
+    return np.array(vectors)
+    
+
+def label_inv_binarize(vectors, classes):
+    # labels: np.array or tensor [batch, classes]
+    # classes: [..] list of classes
+    # follows sklearn LabelBinarizer.inverse_transform()
+    # given all zeros, predicts label at index 0, instead of returning none!
+    # sklearn doesn't have functional API of inverse transform
+    labels = []
+    for each in vectors:
+        index = np.argmax(each)
+        labels.append(classes[index])
+    return labels
 
 
 class SchemaList(object):
