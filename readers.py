@@ -79,6 +79,15 @@ class SchemaList(object):
 
 
 class DialogueReader(DatasetReader):
+    """
+    Each instance encodes a full dialogue, allowing the trainer
+    to process turns and services sequentially. Turns could be merged
+    into batch to process otherwise.
+
+    Padding value:
+        - text fields: 0
+        - array fields: -1
+    """
 
     def __init__(self, limit=float("inf"), lazy=False):
         super().__init__(lazy)
@@ -137,7 +146,7 @@ class DialogueReader(DatasetReader):
         frames = sorted(turn["frames"], key=lambda x: services.index(x["service"]))
         exists_onehot = label_binarize([f["service"] for f in frames], classes=services)
         exists = np.sum(exists_onehot, axis=0) # eg: [1, 0, 1, 0]
-        return ArrayField(exists)
+        return ArrayField(exists, padding_value=-1)
         
     def field_intent(self, dialogue):
         # NOTE: we might want to copy these lists, because if they are changed in an epoch,
@@ -167,14 +176,14 @@ class DialogueReader(DatasetReader):
                 all_intents = self.schemas.get(service)["intent_name"]
                 intent = frame["state"]["active_intent"]
                 encoding = label_binarize([intent], classes=all_intents)[0]
-                exists_onehot[service] = ArrayField(encoding)
+                exists_onehot[service] = ArrayField(encoding, padding_value=-1)
             
             # fill with empty encodings for remaining
             for service in exists_onehot:
                 if exists_onehot[service] is None:
                     all_intents = self.schemas.get(service)["intent_name"]
                     encoding = np.array([0] * len(all_intents))
-                    exists_onehot[service] = ArrayField(encoding)
+                    exists_onehot[service] = ArrayField(encoding, padding_value=-1)
 
             return ListField(list(exists_onehot.values()))
 
@@ -197,7 +206,8 @@ class DialogueReader(DatasetReader):
         iscat_list = []
         for service in dialogue["services"]:
             iscat = np.array([int(i) for i in self.schemas.get(service)["slot_iscat"]])
-            iscat_list.append(ArrayField(iscat))
+            iscat_list.append(ArrayField(iscat, padding_value=-1))
+        # use ListField because each element may have different shape 
         return ListField(iscat_list)
 
     def field_num_turns(self, dialogue):
