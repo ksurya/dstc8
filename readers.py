@@ -8,7 +8,7 @@ from functools import lru_cache
 from sklearn.preprocessing import label_binarize
 
 from allennlp.data import Instance
-from allennlp.data.fields import TextField, ListField, MetadataField, ArrayField, IndexField
+from allennlp.data.fields import TextField, ListField, MetadataField, ArrayField, IndexField, Field
 from allennlp.data.dataset_readers import DatasetReader
 from allennlp.data.token_indexers import PretrainedBertIndexer, SingleIdTokenIndexer
 from allennlp.data.tokenizers.word_splitter import BertBasicWordSplitter
@@ -82,15 +82,16 @@ class DialogueReader(DatasetReader):
 
     def __init__(self, limit=float("inf"), lazy=False):
         super().__init__(lazy)
-        self.files_limit = limit
+        self.limit = limit
         self.token_indexers = {"tokens": PretrainedBertIndexer("bert-base-uncased")}
         self.tokenizer = BertBasicWordSplitter()
         self.schemas = None
 
     def _read(self, files_path):
         self.schemas = SchemaList(os.path.join(files_path, "schema.json"))
-        for count, filename in enumerate(glob.glob(os.path.join(files_path, "dialogues*.json"))):
-            if count < self.files_limit:
+        filenames = sorted(glob.glob(os.path.join(files_path, "dialogues*.json")))
+        for count, filename in enumerate(filenames):
+            if count < self.limit:
                 with open(filename) as f:
                     dialogs = json.load(f)
                     for d in dialogs:
@@ -135,7 +136,8 @@ class DialogueReader(DatasetReader):
         # order frames by dialog.services list, to establish one to one mappings across fields
         frames = sorted(turn["frames"], key=lambda x: services.index(x["service"]))
         exists_onehot = label_binarize([f["service"] for f in frames], classes=services)
-        return ArrayField(exists_onehot)
+        exists = np.sum(exists_onehot, axis=0) # eg: [1, 0, 1, 0]
+        return ArrayField(exists)
         
     def field_intent(self, dialogue):
         # NOTE: we might want to copy these lists, because if they are changed in an epoch,
@@ -159,6 +161,7 @@ class DialogueReader(DatasetReader):
                 exists_onehot[service] = None
             
             # fill encodings of existing services
+            # this _will_ be onehot assuming each service has only one intent!
             for frame in turn["frames"]:
                 service = frame["service"]
                 all_intents = self.schemas.get(service)["intent_name"]
@@ -197,26 +200,34 @@ class DialogueReader(DatasetReader):
             iscat_list.append(ArrayField(iscat))
         return ListField(iscat_list)
 
+    def field_num_turns(self, dialogue):
+        return MetadataField(len(dialogue["turns"]))
+
+    def field_turn_num_frames(self, turnid, dialogue):
+        return MetadataField(len(dialogue["turns"][turnid]["frames"]))
+
     def text_to_instance(self, dialogue):
         # initialize turn fields with list, dialog level fields with None
         fields = dict(
-            dialogue_id=None,
+            dialogue_id=None, # [Batch,]
+            num_turns=None, # [Batch,]
+            num_frames=[], # [Batch, Turn] equals to number of services per turn
 
             # messages
             speaker=[], # [Batch, Turn]
             utter=[], # [Batch, Turn, Tokens]
-            sys_utter=[], # [Batch, Turn, Tokens]
-            usr_utter=[], # [Batch, Turn, Tokens]
+            sys_utter=[], # [Batch, Turn, Tokens] only system utters
+            usr_utter=[], # [Batch, Turn, Tokens] only user utters
 
             # services
             service=None, # [Batch, Service] all dialog services
             service_desc=None, # [Batch, Service, Tokens] service descriptions
-            service_exist=[], # [Batch, Turn, Service, Service] one hot
+            service_exist=[], # [Batch, Turn, Service] binarized
             
             # intents
             intent=None, # [Batch, Service, Intent]
             intent_desc=None, # [Batch, Service, Intent, Tokens]
-            intent_exist=[], # [Batch, Turn, Service, Intent, Intent]
+            intent_exist=[], # [Batch, Turn, Service, Intent]
 
             # state slots
             slots=None, # [Batch, Service, Slot]
