@@ -53,27 +53,29 @@ class UserIntentPredictor(Model):
         self.l2 = DialogState(self.emb.output_dim)
 
         # score
-        #self.l3 = nn.Linear(self.emb.output_dim, 1)
+        self.l3 = nn.Linear(self.emb.output_dim, 1)
         
         # metrics
         self.accuracy = CategoricalAccuracy()
 
         # init weights
         # TODO: classifier's performance changes heavily 
-        # when weights are set to 0 / normal dist
-        # when bias is set 0
         for name, param in self.named_parameters():
             if not name.startswith("emb."):
+                print("Initializing bias/weights of ", name)
                 if "weight" in name:
-                    print("Initializing weights of ", name)
                     nn.init.xavier_uniform_(param)
+                else:
+                    param.data.fill_(0.)
 
     def get_metrics(self, reset):
         return {"accuracy": self.accuracy.get_metric(reset)}
 
     def _get_score(self, ht_utter, hw_utter, ht_desc, hw_desc, context):
         hw = hw_desc * hw_utter * context
-        mat = torch.einsum("lbe,bite->bi", hw, ht_desc)
+        hw = hw[-1]
+        mat = torch.einsum("be,bite->bie", hw, ht_desc)
+        mat = self.l3(mat).squeeze(-1)
         mat = torch.sigmoid(mat)
         return mat
 
@@ -117,12 +119,17 @@ class UserIntentPredictor(Model):
                 target_labels.float(), 
                 mask=mask,
             )
-
-            # print("Target", target_score.tolist())
-            # print("Pred: ", score.tolist())
-            # print("Mask: ", mask.tolist())
-            # print("Acc: ", self.accuracy.get_metric())
-            # print("\n\n")
+            
+            with open("switch.txt") as f:
+                switch = f.read()
+                if switch == "1":
+                    # print("Target", target_score.tolist())
+                    # print("Pred: ", score.tolist())
+                    print("Target", torch.argmax(target_score, -1).tolist())
+                    print("Pred: ", torch.argmax(score, -1).tolist())
+                    print("Mask: ", mask.long().tolist())
+                    print("Acc: ", self.accuracy.get_metric())
+                    print("\n\n")
 
             # calculate loss
             mask = (target_score != -1).float()
