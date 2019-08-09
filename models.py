@@ -13,7 +13,7 @@ class DialogState(nn.Module):
 
     def __init__(self, emb_size):
         super().__init__()
-        self.l0 = nn.GRU(emb_size, emb_size, batch_first=True)
+        self.l0 = nn.GRU(emb_size, emb_size, num_layers=2, batch_first=True)
 
     def _get_state(self, deviceid, reset):
         # obj is not threadsafe, so we need diff obj for each device
@@ -25,17 +25,16 @@ class DialogState(nn.Module):
             state["l0"] = state["l0"].detach()
         return state
 
-    def forward(self, utter, desc, reset=False):
-        assert utter.device.index == desc.device.index
-        state = self._get_state(utter.device.index, reset)
+    def forward(self, usr_utter, sys_utter, reset=False):
+        state = self._get_state(usr_utter.device.index, reset)
 
         # encode utter
-        ht, hw = self.l0(utter, state["l0"])
+        ht_usr, hw = self.l0(usr_utter, state["l0"])
+        if sys_utter is not None:
+            ht_sys, hw = self.l0(sys_utter, hw)
+
         state["l0"] = hw
-        
-        # [batch, emb]
-        context = hw
-        return context
+        return hw
 
 
 class UserIntentPredictor(Model):
@@ -46,9 +45,14 @@ class UserIntentPredictor(Model):
         self.emb = PretrainedBertEmbedder("bert-base-uncased", requires_grad=False, top_layer_only=True)
         
         # encode utter and desc tokens
-        self.l0 = nn.GRU(self.emb.output_dim, self.emb.output_dim, batch_first=True)
-        self.l1 = nn.GRU(self.emb.output_dim, self.emb.output_dim, batch_first=True)
+        self.l0 = nn.TransformerEncoder(
+            nn.TransformerEncoderLayer(self.emb.output_dim, 2), 2
+        )
 
+        self.l1 = nn.TransformerEncoder(
+            nn.TransformerEncoderLayer(self.emb.output_dim, 2), 2
+        )
+        
         # maintain dialog state
         self.l2 = DialogState(self.emb.output_dim)
 
@@ -60,48 +64,51 @@ class UserIntentPredictor(Model):
 
         # init weights
         # TODO: classifier's performance changes heavily 
-        for name, param in self.named_parameters():
-            if not name.startswith("emb."):
-                print("Initializing bias/weights of ", name)
-                if "weight" in name:
-                    nn.init.xavier_uniform_(param)
-                else:
-                    param.data.fill_(0.)
+        # for name, param in self.named_parameters():
+        #     if not name.startswith("emb.") and not name.startswith("l3."):
+        #         print("Initializing bias/weights of ", name)
+        #         if "weight" in name:
+        #             nn.init.xavier_uniform_(param)
+        #         else:
+        #             param.data.fill_(0.)
 
     def get_metrics(self, reset):
         return {"accuracy": self.accuracy.get_metric(reset)}
 
-    def _get_score(self, ht_utter, hw_utter, ht_desc, hw_desc, context):
-        hw = hw_desc * hw_utter * context
-        hw = hw[-1]
-        mat = torch.einsum("be,bite->bie", hw, ht_desc)
+    def _get_score(self, usr_utter, sys_utter, intent_desc, context):
+        mat = torch.einsum("bite,lbe->bie", intent_desc, context)
         mat = self.l3(mat).squeeze(-1)
-        mat = torch.sigmoid(mat)
+        mat = F.softmax(mat, dim=-1)
         return mat
 
     def forward(self, **batch):
         turnid = int(batch["turnid"])
         serviceid = int(batch["serviceid"])
 
-        # tensors to play with
-        utter = batch["usr_utter"]["tokens"][:,turnid,:] # [batch, tokens]
-        utter = self.emb(utter) # [batch, tokens, emb]
-        ht_utter, hw_utter = self.l0(utter) # [batch, tokens, emb * dir] and [layers * dir, batch, emb]
+        usr_utter = batch["usr_utter"]["tokens"][:,turnid,:] # [batch, tokens]
+        usr_utter = self.emb(usr_utter) # [batch, tokens, emb]
+        usr_utter = self.l0(usr_utter.permute(1,0,2)).permute(1,0,2) # [batch, tokens, emb]
+
+        sys_utter = None
+        if turnid > 0:
+            sys_utter = batch["sys_utter"]["tokens"][:,turnid-1,:] # [batch, tokens]
+            sys_utter = self.emb(sys_utter) # [batch, tokens, emb]
+            sys_utter = self.l0(sys_utter.permute(1,0,2)).permute(1,0,2) # [batch, tokens, emb]
 
         intent_desc = batch["intent_desc"]["tokens"] # [batch, intents, tokens]
+        shape = intent_desc.shape
         intent_desc = self.emb(intent_desc)[:,serviceid,:]  # [batch, intents, tokens, emb] slice after embedding.. not working otherwise
-        ht_desc, hw_desc = self.l1(torch.flatten(intent_desc, 1, 2)) # [batch, tokens, emb * dir] and [layers * dim, batch, emb]
-        ht_desc = ht_desc.reshape(list(intent_desc.shape[:-1]) + [ht_desc.shape[-1]]) # [batch, intents, tokens, emb * dir]
+        intent_desc = self.l1(torch.flatten(intent_desc, 1, 2).permute(1,0,2)).permute(1,0,2) # [batch, tokens, emb ]
+        intent_desc = intent_desc.reshape(list(shape) + [-1]) # [batch, intents, tokens, emb]
 
         # context
-        context = self.l2(utter, intent_desc, reset=turnid==0) # [layers * dim, batch, emb]
+        context = self.l2(usr_utter, sys_utter, reset=turnid==0) # [layers * dim, batch, emb]
 
         # compute prediction onehot
         score = self._get_score(
-            ht_utter,
-            hw_utter,
-            ht_desc,
-            hw_desc,
+            usr_utter,
+            sys_utter,
+            intent_desc,
             context,
         )
 
@@ -132,14 +139,19 @@ class UserIntentPredictor(Model):
                     print("\n\n")
 
             # calculate loss
+            # mask = (target_score != -1).float()
+            # output["loss"] = F.binary_cross_entropy(
+            #     score.float(),
+            #     target_score.float(),
+            #     weight=mask,
+            #     #reduction="sum"
+            # )
             mask = (target_score != -1).float()
-            output["loss"] = F.binary_cross_entropy(
-                score.float(),
-                target_score.float(),
-                weight=mask,
-                #reduction="sum"
+            output["loss"] = F.mse_loss(
+                score * mask,
+                target_score * mask,
+                reduction="sum"
             )
-
-            #output["loss"] /= target_score.shape[0]
+            output["loss"] /= target_score.shape[0]
 
         return output
