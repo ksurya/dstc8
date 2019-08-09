@@ -28,6 +28,7 @@ class DialogIterator(object):
             return math.ceil(batches / self._batch_size)
 
     def __call__(self, *args, **kw):
+        # in multiple devices, Trainer would not execute turn=0 at first in all devices!!
         for batch in self.iterator(*args, **kw):
             num_turns = batch["usr_utter"]["tokens"].shape[1]
             num_services = batch["service_desc"]["tokens"].shape[1]
@@ -36,6 +37,11 @@ class DialogIterator(object):
                     inputs = dict(turnid=turnid, serviceid=sid)
                     inputs.update(batch)
                     yield inputs
+            # for sid in range(num_services):
+            #     for turnid in range(num_turns):
+            #         inputs = dict(turnid=turnid, serviceid=sid)
+            #         inputs.update(batch)
+            #         yield inputs
 
 
 if __name__ == "__main__":
@@ -46,24 +52,26 @@ if __name__ == "__main__":
     from readers import DialogueReader
     import os
 
-    allen_device = [int(i) for i in os.environ.get("CUDA_VISIBLE_DEVICES", "-1").split(",")]
-    torch_device = "cuda" if allen_device[0] != -1 else "cpu"
+    this_dir = os.path.abspath(os.path.dirname(__file__))
+    allen_device = 0
+    torch_device = 0
 
     print("loading training data")
-    train_ds = torch.load("data/preprocessed/dataset.pkl")
-    vocab = torch.load("data/preprocessed/vocab.pkl")
+    train_ds = torch.load(os.path.join(this_dir, "data/preprocessed/train_ds.pkl"))
+    vocab = torch.load(os.path.join(this_dir, "data/preprocessed/vocab.pkl"))
 
     print("loading model")
     model = UserIntentPredictor(vocab).to(torch_device)
-    optim = torch.optim.Adam(model.parameters(), lr=0.001)
+    optim = torch.optim.Adam(model.parameters(), lr=1e-6)
     iterator = BasicIterator(batch_size=32)
     iterator.index_with(vocab)
+    iterator = DialogIterator(iterator)
 
     print("started training")
     trainer = Trainer(
         model=model,
         optimizer=optim,
-        iterator=DialogIterator(iterator),
+        iterator=iterator,
         train_dataset=train_ds,
         num_epochs=2,
         cuda_device=allen_device,

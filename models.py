@@ -1,7 +1,7 @@
 from allennlp.models import Model
 from allennlp.modules.token_embedders import PretrainedBertEmbedder
 from allennlp.nn.util import get_text_field_mask
-from allennlp.training.metrics import BooleanAccuracy
+from allennlp.training.metrics import BooleanAccuracy, CategoricalAccuracy
 
 import torch.optim as optim
 import torch.nn.functional as F
@@ -9,55 +9,33 @@ import torch.nn as nn
 import torch
 
 
-
-class StatefulMultiheadAttention(nn.MultiheadAttention):
-
-    def __init__(self, *args, **kw):
-        super().__init__(*args, **kw)
-        self.saved_state = {}
-
-    def _get_input_buffer(self, incremental_state):
-        return self.saved_state
-
-    def _set_input_buffer(self, incremental_state, saved_state):
-        self.saved_state = saved_state
-
-    def reset_input_buffer(self):
-        self.saved_state = {}
-
-
-class DialogContext(nn.Module):
+class DialogState(nn.Module):
 
     def __init__(self, emb_size):
         super().__init__()
-        # https://arxiv.org/pdf/1706.03762.pdf
-        self.l0 = StatefulMultiheadAttention(emb_size, 2)
+        self.l0 = nn.GRU(emb_size, emb_size, batch_first=True)
 
-    def reset_input_buffer(self):
-        self.l0.reset_input_buffer()
+    def _get_state(self, deviceid, reset):
+        # obj is not threadsafe, so we need diff obj for each device
+        obj_name = f"state_{deviceid}"
+        if reset or obj_name not in self.__dict__:
+            setattr(self, obj_name, dict(l0=None))
+        state = getattr(self, obj_name)
+        if state["l0"] is not None:
+            state["l0"] = state["l0"].detach()
+        return state
 
-    def forward(self, utter_emb, desc_emb):
-        # query [Tokens, Batch, Emb]
-        utter_emb = utter_emb.permute(1,0,2)
+    def forward(self, utter, desc, reset=False):
+        assert utter.device.index == desc.device.index
+        state = self._get_state(utter.device.index, reset)
 
-        # key and values [Service * Tokens, Batch, Emb]
-        desc_emb = torch.flatten(desc_emb, 1, 2)
-        desc_emb = desc_emb.permute(1,0,2)
-
-        # output [Tokens, Batch, Emb]
-        # weights [Batch, Tokens, Service * Tokens]
-        output, weights = self.l0(
-            utter_emb, 
-            desc_emb, 
-            desc_emb, 
-            incremental_state=True,
-            need_weights=True,
-        )
-
-        # change shapes
-        output = output.permute(1,0,2)
-
-        return output
+        # encode utter
+        ht, hw = self.l0(utter, state["l0"])
+        state["l0"] = hw
+        
+        # [batch, emb]
+        context = hw
+        return context
 
 
 class UserIntentPredictor(Model):
@@ -66,53 +44,66 @@ class UserIntentPredictor(Model):
         super().__init__(vocab)
         # embedding layer for encoding text
         self.emb = PretrainedBertEmbedder("bert-base-uncased", requires_grad=False, top_layer_only=True)
-        # layers
-        self.l0 = nn.Linear(self.emb.output_dim, self.emb.output_dim)
-        self.l1 = nn.Linear(self.emb.output_dim, self.emb.output_dim)
-        #self.l2 = DialogContext(self.emb.output_dim)
+        
+        # encode utter and desc tokens
+        self.l0 = nn.GRU(self.emb.output_dim, self.emb.output_dim, batch_first=True)
+        self.l1 = nn.GRU(self.emb.output_dim, self.emb.output_dim, batch_first=True)
+
+        # maintain dialog state
+        self.l2 = DialogState(self.emb.output_dim)
+
+        # score
+        #self.l3 = nn.Linear(self.emb.output_dim, 1)
+        
         # metrics
-        self.accuracy = BooleanAccuracy()
+        self.accuracy = CategoricalAccuracy()
 
         # init weights
+        # TODO: classifier's performance changes heavily 
+        # when weights are set to 0 / normal dist
+        # when bias is set 0
         for name, param in self.named_parameters():
             if not name.startswith("emb."):
-                param.data.fill_(0)
-
-    def reset_context(self):
-        self.l2.reset_input_buffer()
+                if "weight" in name:
+                    print("Initializing weights of ", name)
+                    nn.init.xavier_uniform_(param)
 
     def get_metrics(self, reset):
         return {"accuracy": self.accuracy.get_metric(reset)}
+
+    def _get_score(self, ht_utter, hw_utter, ht_desc, hw_desc, context):
+        hw = hw_desc * hw_utter * context
+        mat = torch.einsum("lbe,bite->bi", hw, ht_desc)
+        mat = torch.sigmoid(mat)
+        return mat
 
     def forward(self, **batch):
         turnid = int(batch["turnid"])
         serviceid = int(batch["serviceid"])
 
-        # encode utter [Batch, Tokens, Emb]
-        utter = self.emb(batch["usr_utter"]["tokens"][:,turnid,:])
-        utter = self.l0(utter)
+        # tensors to play with
+        utter = batch["usr_utter"]["tokens"][:,turnid,:] # [batch, tokens]
+        utter = self.emb(utter) # [batch, tokens, emb]
+        ht_utter, hw_utter = self.l0(utter) # [batch, tokens, emb * dir] and [layers * dir, batch, emb]
 
-        # encode intent desc [Batch, Intent, Tokens, Emb]
-        intent_desc = self.emb(batch["intent_desc"]["tokens"])
-        intent_desc = intent_desc[:,serviceid,:]
-        intent_desc = self.l1(intent_desc)
+        intent_desc = batch["intent_desc"]["tokens"] # [batch, intents, tokens]
+        intent_desc = self.emb(intent_desc)[:,serviceid,:]  # [batch, intents, tokens, emb] slice after embedding.. not working otherwise
+        ht_desc, hw_desc = self.l1(torch.flatten(intent_desc, 1, 2)) # [batch, tokens, emb * dir] and [layers * dim, batch, emb]
+        ht_desc = ht_desc.reshape(list(intent_desc.shape[:-1]) + [ht_desc.shape[-1]]) # [batch, intents, tokens, emb * dir]
 
-        # [Batch, Tokens, Emb]
-        #context = self.l2(utter, intent_desc)
+        # context
+        context = self.l2(utter, intent_desc, reset=turnid==0) # [layers * dim, batch, emb]
 
-        # see https://github.com/allenai/allennlp/issues/2668
-        mask_utter = (batch["usr_utter"]["tokens"][:,turnid,:] != 0).float()
-        mask_intent_desc = (batch["intent_desc"]["tokens"][:,serviceid,:] != 0).float()
-        
-        # ranking on intents at each service
-        score = torch.einsum(
-            "bxe,bx,biye,biy->bi", 
-            utter, mask_utter,
-            intent_desc, mask_intent_desc,
+        # compute prediction onehot
+        score = self._get_score(
+            ht_utter,
+            hw_utter,
+            ht_desc,
+            hw_desc,
+            context,
         )
-        score = torch.sigmoid(score) # [B, I]
-        labels = torch.argmax(score, -1) # [B,]
-        output = {"score": score, "labels": labels}
+
+        output = {"score": score}
 
         if "intent_exist" in batch:
             # target values
@@ -120,18 +111,28 @@ class UserIntentPredictor(Model):
             values, target_labels = torch.max(target_score, -1) # [Batch,]
 
             # update the accuracy counters. reset at every dialogue
+            mask = (values != -1).float()
             self.accuracy(
-                labels.float(), 
+                score.float(),
                 target_labels.float(), 
-                mask=(values != -1).float(),
+                mask=mask,
             )
+
+            # print("Target", target_score.tolist())
+            # print("Pred: ", score.tolist())
+            # print("Mask: ", mask.tolist())
+            # print("Acc: ", self.accuracy.get_metric())
+            # print("\n\n")
 
             # calculate loss
+            mask = (target_score != -1).float()
             output["loss"] = F.binary_cross_entropy(
-                score,
-                target_score,
-                weight=(target_score != -1).float(), # passing mask as weights
+                score.float(),
+                target_score.float(),
+                weight=mask,
+                #reduction="sum"
             )
 
+            #output["loss"] /= target_score.shape[0]
+
         return output
-    

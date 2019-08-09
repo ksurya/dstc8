@@ -6,7 +6,7 @@ import numpy as np
 from collections import OrderedDict
 from functools import lru_cache
 
-from allennlp.data import Instance
+from allennlp.data import Instance, Token
 from allennlp.data.fields import TextField, ListField, MetadataField, ArrayField, IndexField, Field
 from allennlp.data.dataset_readers import DatasetReader
 from allennlp.data.token_indexers import PretrainedBertIndexer, SingleIdTokenIndexer
@@ -121,15 +121,13 @@ class DialogueReader(DatasetReader):
         self.tokenizer = BertBasicWordSplitter()
         self.schemas = None
 
-    def _read(self, files_path):
-        self.schemas = SchemaList(os.path.join(files_path, "schema.json"))
-        filenames = sorted(glob.glob(os.path.join(files_path, "dialogues*.json")))
-        for count, filename in enumerate(filenames):
-            if count < self.limit:
-                with open(filename) as f:
-                    dialogs = json.load(f)
-                    for d in dialogs:
-                        yield self.text_to_instance(d)
+    def _read(self, file_path):
+        dirpath = os.path.split(file_path)[0]
+        self.schemas = SchemaList(os.path.join(dirpath, "schema.json"))
+        with open(file_path) as f:
+            dialogs = json.load(f)
+            for d in dialogs:
+                yield self.text_to_instance(d)
 
     def text_field(self, sent):
         tokens = self.tokenizer.split_words(sent)
@@ -176,13 +174,14 @@ class DialogueReader(DatasetReader):
     def field_intent(self, dialogue):
         # NOTE: we might want to copy these lists, because if they are changed in an epoch,
         # the next epoch will not retain the changes
-        intent_list = [self.schemas.get(s)["intent_name"] for s in dialogue["services"]]
+        intent_list = [self.schemas.get(s)["intent_name"] + ["NoIntent"] for s in dialogue["services"]]
         return MetadataField(intent_list)
 
     def field_intent_desc(self, dialogue):
         desc_list = []
         for service in dialogue["services"]:
             desc = [self.text_field(d) for d in self.schemas.get(service)["intent_desc"]]
+            desc.append(self.text_field("NONE")) # for NoIntent 
             desc_list.append(ListField(desc))
         return ListField(desc_list)
 
@@ -198,7 +197,7 @@ class DialogueReader(DatasetReader):
             # this _will_ be onehot assuming each service has only one intent!
             for frame in turn["frames"]:
                 service = frame["service"]
-                all_intents = self.schemas.get(service)["intent_name"]
+                all_intents = self.schemas.get(service)["intent_name"] + ["NoIntent"]
                 intent = frame["state"]["active_intent"]
                 encoding = label_binarize([intent], classes=all_intents)[0]
                 exists_onehot[service] = ArrayField(encoding, padding_value=-1)
@@ -206,11 +205,31 @@ class DialogueReader(DatasetReader):
             # fill with empty encodings for remaining
             for service in exists_onehot:
                 if exists_onehot[service] is None:
-                    all_intents = self.schemas.get(service)["intent_name"]
+                    all_intents = self.schemas.get(service)["intent_name"] + ["NoIntent"]
                     encoding = np.array([0] * len(all_intents))
+                    encoding[-1] = 1 # set 1 to NoIntent
                     exists_onehot[service] = ArrayField(encoding, padding_value=-1)
 
             return ListField(list(exists_onehot.values()))
+
+    def field_turn_intent_changed(self, turnid, dialogue):
+        turn = dialogue["turns"][turnid]
+        if turn["speaker"] == "USER":
+            # assumes system turn is always followed by user turn
+            prev_user_turn = dialogue["turns"][turnid-2] if turnid >= 2 else turn
+            # maintain order of services: service -> changed
+            intent_changed = OrderedDict()
+            for service in dialogue["services"]:
+                intent_changed[service] = 0
+            
+            for frame, prevframe in zip(turn["frames"], prev_user_turn["frames"]):
+                service = frame["service"]
+                intent = frame["state"]["active_intent"]
+                prev_intent = prevframe["state"]["active_intent"]
+                intent_changed[service] = int(intent == prev_intent)
+            
+            values = list(intent_changed.values())
+            return ArrayField(np.array(values), padding_value=-1)
 
     def field_slots(self, dialogue):
         slot_list = []
@@ -263,6 +282,7 @@ class DialogueReader(DatasetReader):
             intent=None, # [Batch, Service, Intent]
             intent_desc=None, # [Batch, Service, Intent, Tokens]
             intent_exist=[], # [Batch, Turn, Service, Intent]
+            intent_changed=[], # [Batch, Turn, Service]
 
             # state slots
             slots=None, # [Batch, Service, Slot]
