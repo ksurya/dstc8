@@ -104,15 +104,9 @@ class SchemaList(object):
 
 
 class DialogueReader(DatasetReader):
-    """
-    Each instance encodes a full dialogue, allowing the trainer
+    """Each instance encodes a full dialogue, allowing the trainer
     to process turns and services sequentially. Turns could be merged
-    into batch to process otherwise.
-
-    Padding value:
-        - text fields: 0
-        - array fields: -1
-    """
+    into batch to process otherwise."""
 
     def __init__(self, limit=float("inf"), lazy=False):
         super().__init__(lazy)
