@@ -14,7 +14,8 @@ class BertForMemory(BertPreTrainedModel):
         self.qa_outputs = nn.Linear(config.hidden_size, 1)
 
         # positional encodings
-        self.mem_pos = nn.Embedding(100, config.hidden_size)
+        self.mem_pos_a = nn.Embedding(384, config.hidden_size)
+        self.mem_pos_b = nn.Embedding(384, config.hidden_size)
         self.turn_pos = nn.Embedding(50, config.hidden_size)
 
         # state encodings
@@ -23,7 +24,7 @@ class BertForMemory(BertPreTrainedModel):
 
         self.apply(self.init_weights)
 
-    def forward(self, input_ids, token_type_ids=None, attention_mask=None, start_positions=None, end_positions=None, position_ids=None, head_mask=None, turnids=None):
+    def forward(self, input_ids, token_type_ids=None, attention_mask=None, start_positions=None, end_positions=None, position_ids=None, head_mask=None, turnids=None, memids=None):
 
         # sequence positions
         pos = torch.zeros(input_ids.shape, device=input_ids.device).long()
@@ -37,7 +38,8 @@ class BertForMemory(BertPreTrainedModel):
         sequence_output = outputs[0]
 
         # positional encodings
-        mem_pos_emb = self.mem_pos(pos * (1 - token_type_ids))
+        mem_pos_emb_a = self.mem_pos_a(memids)
+        mem_pos_emb_b = self.mem_pos_a(pos)
         turn_pos_emb = self.turn_pos(turnids.unsqueeze(-1))
 
         attn_enabled = False
@@ -46,9 +48,9 @@ class BertForMemory(BertPreTrainedModel):
         if self.prev_state is None or self.prev_state.shape[0] != input_ids.shape[0]:
             state_attn = 0
         else:
-            state_attn = F.softmax(self.prev_state_enc(self.prev_state), -1)
+            state_attn = F.relu(self.prev_state_enc(self.prev_state))
             attn_enabled = True
-        sequence_output = sequence_output + mem_pos_emb + turn_pos_emb
+        sequence_output = sequence_output + mem_pos_emb_a + mem_pos_emb_b + turn_pos_emb
         self.prev_state = sequence_output.detach()
 
         # if self.context_h is not None and self.context_h.shape[1] != sequence_output.shape[0]:
@@ -57,7 +59,7 @@ class BertForMemory(BertPreTrainedModel):
         # self.context_h = context_h.detach()
 
         if attn_enabled:
-            logits = self.qa_outputs(sequence_output) * state_attn
+            logits = self.qa_outputs(sequence_output) + state_attn
         else:
             logits = self.qa_outputs(sequence_output)
 

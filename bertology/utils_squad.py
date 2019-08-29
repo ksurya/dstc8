@@ -46,7 +46,8 @@ class SquadExample(object):
                  start_position=None,
                  end_position=None,
                  is_impossible=None,
-                 turnid=None):
+                 turnid=None,
+                 mem_tokens=None):
         self.qas_id = qas_id
         self.question_text = question_text
         self.doc_tokens = doc_tokens
@@ -55,6 +56,7 @@ class SquadExample(object):
         self.end_position = end_position
         self.is_impossible = is_impossible
         self.turnid = turnid
+        self.mem_tokens = mem_tokens
 
     def __str__(self):
         return self.__repr__()
@@ -73,6 +75,8 @@ class SquadExample(object):
             s += ", is_impossible: %r" % (self.is_impossible)
         if self.turnid is not None:
             s += ", turnid: %r" % (self.turnid)
+        if self.mem_tokens:
+            s += ", mem_tokens: %r" % (self.mem_tokens)
         return s
 
 
@@ -95,7 +99,8 @@ class InputFeatures(object):
                  start_position=None,
                  end_position=None,
                  is_impossible=None,
-                 turnid=None):
+                 turnid=None,
+                 memids=None):
         self.unique_id = unique_id
         self.example_index = example_index
         self.doc_span_index = doc_span_index
@@ -112,6 +117,7 @@ class InputFeatures(object):
         self.end_position = end_position
         self.is_impossible = is_impossible
         self.turnid = turnid
+        self.memids = memids
 
 
 def read_squad_examples(input_file, is_training, version_2_with_negative):
@@ -129,6 +135,7 @@ def read_squad_examples(input_file, is_training, version_2_with_negative):
         for paragraph in entry["paragraphs"]:
             paragraph_text = paragraph["context"]
             doc_tokens = []
+            mem_tokens = paragraph["context"].split(" . ") # update
             char_to_word_offset = []
             prev_is_whitespace = True
             for c in paragraph_text:
@@ -190,7 +197,8 @@ def read_squad_examples(input_file, is_training, version_2_with_negative):
                     start_position=start_position,
                     end_position=end_position,
                     is_impossible=is_impossible,
-                    turnid=turnid)
+                    turnid=turnid,
+                    mem_tokens=mem_tokens)
                 examples.append(example)
     return examples
 
@@ -223,12 +231,18 @@ def convert_examples_to_features(examples, tokenizer, max_seq_length,
         tok_to_orig_index = []
         orig_to_tok_index = []
         all_doc_tokens = []
+        all_mem_tokens = []
+        mem_tok = 1
+
         for (i, token) in enumerate(example.doc_tokens):
             orig_to_tok_index.append(len(all_doc_tokens))
             sub_tokens = tokenizer.tokenize(token)
+            if token == ".":
+                mem_tok += 1
             for sub_token in sub_tokens:
                 tok_to_orig_index.append(i)
                 all_doc_tokens.append(sub_token)
+                all_mem_tokens.append(mem_tok)
 
         tok_start_position = None
         tok_end_position = None
@@ -266,6 +280,7 @@ def convert_examples_to_features(examples, tokenizer, max_seq_length,
 
         for (doc_span_index, doc_span) in enumerate(doc_spans):
             tokens = []
+            memids = []
             token_to_orig_map = {}
             token_is_max_context = {}
             segment_ids = []
@@ -277,6 +292,7 @@ def convert_examples_to_features(examples, tokenizer, max_seq_length,
             # CLS token at the beginning
             if not cls_token_at_end:
                 tokens.append(cls_token)
+                memids.append(0)
                 segment_ids.append(cls_token_segment_id)
                 p_mask.append(0)
                 cls_index = 0
@@ -284,15 +300,18 @@ def convert_examples_to_features(examples, tokenizer, max_seq_length,
             # Query
             for token in query_tokens:
                 tokens.append(token)
+                memids.append(0)
                 segment_ids.append(sequence_a_segment_id)
                 p_mask.append(1)
 
             # SEP token
             tokens.append(sep_token)
+            memids.append(0)
             segment_ids.append(sequence_a_segment_id)
             p_mask.append(1)
 
             # Paragraph
+            memids.extend(all_mem_tokens)
             for i in range(doc_span.length):
                 split_token_index = doc_span.start + i
                 token_to_orig_map[len(tokens)] = tok_to_orig_index[split_token_index]
@@ -309,6 +328,7 @@ def convert_examples_to_features(examples, tokenizer, max_seq_length,
             tokens.append(sep_token)
             segment_ids.append(sequence_b_segment_id)
             p_mask.append(1)
+            memids.append(0)
 
             # CLS token at the end
             if cls_token_at_end:
@@ -316,6 +336,7 @@ def convert_examples_to_features(examples, tokenizer, max_seq_length,
                 segment_ids.append(cls_token_segment_id)
                 p_mask.append(0)
                 cls_index = len(tokens) - 1  # Index of classification token
+                memids.append(0)
 
             input_ids = tokenizer.convert_tokens_to_ids(tokens)
 
@@ -326,6 +347,7 @@ def convert_examples_to_features(examples, tokenizer, max_seq_length,
             # Zero-pad up to the sequence length.
             while len(input_ids) < max_seq_length:
                 input_ids.append(pad_token)
+                memids.append(0)
                 input_mask.append(0 if mask_padding_with_zero else 1)
                 segment_ids.append(pad_token_segment_id)
                 p_mask.append(1)
@@ -333,6 +355,7 @@ def convert_examples_to_features(examples, tokenizer, max_seq_length,
             assert len(input_ids) == max_seq_length
             assert len(input_mask) == max_seq_length
             assert len(segment_ids) == max_seq_length
+            assert len(memids) == max_seq_length
 
             span_is_impossible = example.is_impossible
             start_position = None
@@ -401,7 +424,8 @@ def convert_examples_to_features(examples, tokenizer, max_seq_length,
                     start_position=start_position,
                     end_position=end_position,
                     is_impossible=span_is_impossible,
-                    turnid=example.turnid))
+                    turnid=example.turnid,
+                    memids=memids))
             unique_id += 1
 
     return features

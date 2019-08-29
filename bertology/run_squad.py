@@ -159,6 +159,7 @@ def train(args, train_dataset, model, tokenizer):
                       'start_positions': batch[3],
                       'end_positions':   batch[4],
                       'turnids': batch[7],
+                      'memids': batch[8],
                     }
             if args.model_type in ['xlnet', 'xlm']:
                 inputs.update({'cls_index': batch[5],
@@ -258,6 +259,7 @@ def evaluate(args, model, tokenizer, prefix=""):
                       # XLM don't use segment_ids
                       'token_type_ids': None if args.model_type == 'xlm' else batch[2],
                       'turnids': batch[8],
+                      'memids': batch[9],
                       }
             example_indices = batch[3]
             if args.model_type in ['xlnet', 'xlm']:
@@ -381,6 +383,8 @@ def load_and_cache_examples(args, tokenizer, evaluate=False, output_examples=Fal
 
     all_turnids = torch.tensor([f.turnid for f in features], dtype=torch.long)
 
+    all_memids = torch.tensor([f.memids for f in features], dtype=torch.long)
+
     if evaluate:
         all_example_index = torch.arange(
             all_input_ids.size(0), dtype=torch.long)
@@ -396,7 +400,7 @@ def load_and_cache_examples(args, tokenizer, evaluate=False, output_examples=Fal
 
         dataset = TensorDataset(all_input_ids, all_input_mask, all_segment_ids,
                                 all_example_index, all_cls_index, all_p_mask, 
-                                all_start_positions, all_end_positions, all_turnids)  # update: last two added
+                                all_start_positions, all_end_positions, all_turnids, all_memids)  # update: last two added
     else:
         all_start_positions = torch.tensor(
             [f.start_position for f in features], dtype=torch.long)
@@ -404,7 +408,7 @@ def load_and_cache_examples(args, tokenizer, evaluate=False, output_examples=Fal
             [f.end_position for f in features], dtype=torch.long)
         dataset = TensorDataset(all_input_ids, all_input_mask, all_segment_ids,
                                 all_start_positions, all_end_positions,
-                                all_cls_index, all_p_mask, all_turnids)
+                                all_cls_index, all_p_mask, all_turnids, all_memids)
 
     if output_examples:
         return dataset, examples, features
