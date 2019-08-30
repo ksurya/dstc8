@@ -19,7 +19,7 @@ class BertForMemory(BertPreTrainedModel):
         self.turn_pos = nn.Embedding(50, config.hidden_size)
 
         # state encodings
-        self.prev_state_enc = nn.Linear(config.hidden_size, 1)
+        self.prev_state_enc = nn.Linear(config.hidden_size, config.hidden_size)
         self.register_buffer("prev_state", None)
 
         self.apply(self.init_weights)
@@ -42,36 +42,20 @@ class BertForMemory(BertPreTrainedModel):
         mem_pos_emb_b = self.mem_pos_a(pos)
         turn_pos_emb = self.turn_pos(turnids.unsqueeze(-1))
 
-        attn_enabled = False
         if (turnids == 0).all():
             self.prev_state = None
         if self.prev_state is None or self.prev_state.shape[0] != input_ids.shape[0]:
-            state_attn = 0
+            state = 0
         else:
-            state_attn = F.relu(self.prev_state_enc(self.prev_state))
-            attn_enabled = True
-        sequence_output = sequence_output + mem_pos_emb_a + mem_pos_emb_b + turn_pos_emb
+            state = F.relu(self.prev_state_enc(self.prev_state))
+
+        sequence_output = sequence_output + mem_pos_emb_a + mem_pos_emb_b + turn_pos_emb + state
         self.prev_state = sequence_output.detach()
 
-        # if self.context_h is not None and self.context_h.shape[1] != sequence_output.shape[0]:
-        #     self.context_h = None
-        # sequence_output, context_h = self.dialog_context(sequence_output, self.context_h)
-        # self.context_h = context_h.detach()
-
-        if attn_enabled:
-            logits = self.qa_outputs(sequence_output) + state_attn
-        else:
-            logits = self.qa_outputs(sequence_output)
+        logits = self.qa_outputs(sequence_output)
 
         logits = logits.squeeze(-1)
         outputs = (logits, logits,) + outputs[2:]
-
-
-        # logits = self.qa_outputs(sequence_output)
-        # start_logits, end_logits = logits.split(1, dim=-1)
-        # start_logits = start_logits.squeeze(-1)
-        # end_logits = end_logits.squeeze(-1)
-        # outputs = (start_logits, end_logits,) + outputs[2:]
 
         if start_positions is not None and end_positions is not None:
             # If we are on multi-GPU, split add a dimension
@@ -86,10 +70,6 @@ class BertForMemory(BertPreTrainedModel):
             end_positions.clamp_(0, ignored_index)
 
             loss_fct = CrossEntropyLoss(ignore_index=ignored_index)
-            # start_loss = loss_fct(start_logits, start_positions)
-            # end_loss = loss_fct(end_logits, end_positions)
-            # total_loss = (start_loss + end_loss) / 2
-            # outputs = (total_loss,) + outputs
 
             loss = loss_fct(logits, start_positions)
             outputs = (loss,) + outputs

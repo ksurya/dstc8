@@ -4,7 +4,7 @@ CUDA_VISIBLE_DEVICES=0 nohup python $PWD/bertology/run_squad.py --model_type ber
 Test
 ====
 
-SAMPLE=bert-10; EXPNAME=0 ; rm -rf $PWD/results/$EXPNAME ; rm -rf $PWD/data/$SAMPLE/cached* ; CUDA_VISIBLE_DEVICES=0 python $PWD/bertology/run_squad.py --model_type memory --model_name_or_path bert-base-uncased --do_train --do_eval --do_lower_case --train_file $PWD/data/$SAMPLE/train.json --predict_file $PWD/data/$SAMPLE/dev.json --per_gpu_train_batch_size=8 --per_gpu_eval_batch_size=8 --output_dir $PWD/results/$EXPNAME --save_steps -1 --num_train_epochs 3
+SAMPLE=bert-100; EXPNAME=3 ; rm -rf $PWD/results/$EXPNAME ; rm -rf $PWD/data/$SAMPLE/cached* ; CUDA_VISIBLE_DEVICES=2 python $PWD/bertology/run_squad.py --model_type memory --model_name_or_path bert-base-uncased --do_eval --do_lower_case --train_file $PWD/data/$SAMPLE/train.json --predict_file $PWD/data/$SAMPLE/dev.json --per_gpu_train_batch_size=8 --per_gpu_eval_batch_size=8 --output_dir $PWD/results/$EXPNAME --save_steps -1 --num_train_epochs 1
 
 Eval
 ====

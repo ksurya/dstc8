@@ -97,6 +97,9 @@ def train(args, train_dataset, model, tokenizer):
         t_total = len(
             train_dataloader) // args.gradient_accumulation_steps * args.num_train_epochs
 
+    # updated.
+    args.warmup_steps = int(0.1 * t_total)
+
     # Prepare optimizer and schedule (linear warmup and decay)
     no_decay = ['bias', 'LayerNorm.weight']
     optimizer_grouped_parameters = [
