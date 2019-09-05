@@ -7,3 +7,5 @@ data
 *.out
 *.log
 .ipynb_checkpoints/
+venv/
+out/
