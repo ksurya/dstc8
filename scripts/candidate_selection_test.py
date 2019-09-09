@@ -12,6 +12,8 @@ import torch.nn as nn
 import torch.optim as optim
 import torch.nn.functional as F
 
+from bert_optim import Adamax, RAdam
+
 from collections import OrderedDict, defaultdict
 from functools import lru_cache
 from ipdb import set_trace
@@ -21,7 +23,7 @@ from tabulate import tabulate
 from allennlp.data import Instance, Token
 from allennlp.data.fields import TextField, ListField, MetadataField, ArrayField, IndexField, Field, AdjacencyField
 from allennlp.data.dataset_readers import DatasetReader
-from allennlp.data.token_indexers import PretrainedBertIndexer, SingleIdTokenIndexer
+from allennlp.data.token_indexers import PretrainedBertIndexer, SingleIdTokenIndexer, WordpieceIndexer
 from allennlp.data.tokenizers.word_splitter import BertBasicWordSplitter
 from allennlp.data.vocabulary import Vocabulary
 from allennlp.data.iterators import BasicIterator
@@ -142,12 +144,87 @@ class Memory(object):
     def get(self, key="noncat"):
         return self.memory[key]
     
-    
+from typing import Dict, List, Callable
+from pytorch_pretrained_bert.tokenization import BertTokenizer
+
+class PretrainedBertIndexerCLS(WordpieceIndexer):
+
+        def __init__(self,
+                 pretrained_model: str,
+                 use_starting_offsets: bool = False,
+                 do_lowercase: bool = True,
+                 never_lowercase: List[str] = None,
+                 max_pieces: int = 512,
+                 truncate_long_sequences: bool = True) -> None:
+
+            bert_tokenizer = BertTokenizer.from_pretrained(pretrained_model, do_lower_case=do_lowercase)
+            super().__init__(vocab=bert_tokenizer.vocab,
+                            wordpiece_tokenizer=bert_tokenizer.wordpiece_tokenizer.tokenize,
+                            namespace="bert",
+                            use_starting_offsets=use_starting_offsets,
+                            max_pieces=max_pieces,
+                            do_lowercase=do_lowercase,
+                            never_lowercase=never_lowercase,
+                            start_tokens=["[CLS]"],
+                            end_tokens=[],
+                            separator_token="[SEP]",
+                            truncate_long_sequences=truncate_long_sequences)
+
+
+class PretrainedBertIndexerSEP(WordpieceIndexer):
+
+        def __init__(self,
+                 pretrained_model: str,
+                 use_starting_offsets: bool = False,
+                 do_lowercase: bool = True,
+                 never_lowercase: List[str] = None,
+                 max_pieces: int = 512,
+                 truncate_long_sequences: bool = True) -> None:
+
+            bert_tokenizer = BertTokenizer.from_pretrained(pretrained_model, do_lower_case=do_lowercase)
+            super().__init__(vocab=bert_tokenizer.vocab,
+                            wordpiece_tokenizer=bert_tokenizer.wordpiece_tokenizer.tokenize,
+                            namespace="bert",
+                            use_starting_offsets=use_starting_offsets,
+                            max_pieces=max_pieces,
+                            do_lowercase=do_lowercase,
+                            never_lowercase=never_lowercase,
+                            start_tokens=[],
+                            end_tokens=["[SEP]"],
+                            separator_token="[SEP]",
+                            truncate_long_sequences=truncate_long_sequences)  
+
+class PretrainedBertIndexerNoSep(WordpieceIndexer):
+
+        def __init__(self,
+                 pretrained_model: str,
+                 use_starting_offsets: bool = False,
+                 do_lowercase: bool = True,
+                 never_lowercase: List[str] = None,
+                 max_pieces: int = 512,
+                 truncate_long_sequences: bool = True) -> None:
+
+            bert_tokenizer = BertTokenizer.from_pretrained(pretrained_model, do_lower_case=do_lowercase)
+            super().__init__(vocab=bert_tokenizer.vocab,
+                            wordpiece_tokenizer=bert_tokenizer.wordpiece_tokenizer.tokenize,
+                            namespace="bert",
+                            use_starting_offsets=use_starting_offsets,
+                            max_pieces=max_pieces,
+                            do_lowercase=do_lowercase,
+                            never_lowercase=never_lowercase,
+                            start_tokens=[],
+                            end_tokens=[],
+                            separator_token="[SEP]",
+                            truncate_long_sequences=truncate_long_sequences)                                                  
+
 class DialogReader(DatasetReader):
 
     def __init__(self, schema, limit, lazy=False):
         super().__init__(lazy)
         self.token_indexers = {"tokens": PretrainedBertIndexer("bert-base-uncased")}
+        self.token_indexers_cls = {"tokens": PretrainedBertIndexerCLS("bert-base-uncased",)}
+        self.token_indexers_sep = {"tokens": PretrainedBertIndexerSEP("bert-base-uncased",)}
+        self.token_indexers_nosep = {"tokens": PretrainedBertIndexerNoSep("bert-base-uncased",)}
         self.tokenizer = BertBasicWordSplitter()
         self.schema = schema
         self.limit = limit
@@ -239,7 +316,7 @@ class DialogReader(DatasetReader):
         
         query_pos = list(range(1, len(query_tokens) + 1))
         
-        fields["query"] = TextField(query_tokens, self.token_indexers)
+        fields["query"] = TextField(query_tokens, self.token_indexers_sep)
         fields["query_type"] = ArrayField(np.array(query_type))
         fields["query_pos"] = ArrayField(np.array(query_pos))
         
@@ -256,7 +333,14 @@ class DialogReader(DatasetReader):
             mtype = np.array([index + 1] * len(tokens))
             istarget = int(mem_val == item["slot_val"])
             
-            mem_tokens.append(TextField(tokens, self.token_indexers))
+            if index == 0:
+                token_indexers = self.token_indexers_cls
+            elif index == len(mem_values) - 1:
+                token_indexers = self.token_indexers_sep
+            else:
+                token_indexers = self.token_indexers_nosep
+
+            mem_tokens.append(TextField(tokens, token_indexers))
             mem_pos.append(ArrayField(pos))
             mem_type.append(ArrayField(mtype))
             mem_loc.append(istarget)
@@ -338,25 +422,31 @@ class CandidateSelector(Model):
         return {"acc": self.accuracy.get_metric(reset)}
     
     def encoder(self, batch):
-        query = self.emb(batch["query"]["tokens"], batch["query"]["tokens-offsets"]) # [batch, seq, emb]
-        #query_type = self.query_type_emb(batch["query_type"].long()) # [batch, seq, emb]
-        #query_pos = self.query_pos_emb(batch["query_pos"].long()) # [batch, seq, emb]
+        q = batch["query"]
+        m = batch["memory"]
+        x_tokens = torch.cat((m["tokens"].flatten(1, 2), q["tokens"], ), -1) # b,s1+s2
+        x_offsets = torch.cat((m["tokens-offsets"].flatten(1,2), q["tokens-offsets"]), -1)
+        x_types = torch.cat((m["tokens-type-ids"].flatten(1,2), q["tokens-type-ids"] + 1), -1)
         
-        memory = self.emb(batch["memory"]["tokens"], batch["memory"]["tokens-offsets"]) # [batch, mem, seq, emb]
-        #memory_pos = self.memory_pos_emb(batch["memory_pos"].long()) # [batch, mem, seq, emb]
-        #memory_type = self.memory_pos_emb(batch["memory_type"].long()) # [batch, mem, seq, emb]
+        enc = self.emb(x_tokens, x_offsets, x_types)
         
-        #enc_query = torch.cat((query, query_type, query_pos), -1)
-        #enc_memory = torch.cat((memory, memory_type, memory_pos), -1)
+        m_len = q["mask"].shape[-1]
+        tot = enc.shape[1]
+
+        mem_enc, query_enc = enc.split([tot - m_len, m_len], 1)
         
-        return query, memory
+        mem_sh = list(m["mask"].shape)
+        mem_enc = mem_enc.view(mem_sh + [-1])
+        
+        return query_enc, mem_enc
     
     
     def decoder(self, query, memory):
         # query: encoder output, batch, seq, emb
         # memory: decoder input, batch, mem, seq, emb
         memory = memory.sum(2)
-        
+        return memory
+
         query = query.permute(1,0,2) # seq, batch, emb
         memory = memory.permute(1,0,2)
         
@@ -404,8 +494,9 @@ class CandidateSelector(Model):
     
     def forward(self, **batch):
         query, memory = self.encoder(batch)
-        query = query.detach()
-        
+        #query = query.detach()
+        #memory = memory.detach()
+
         decoded = self.decoder(query, memory) # batch, mem, emb
 
         target = batch["memory_loc"] # [batch, mem]
@@ -426,11 +517,14 @@ torch_device=2
 
 model = CandidateSelector(vocab).to(torch_device)
 optimizer = optim.Adam(model.parameters(), lr=3e-5)
+#optimizer.initialize_step(0)
 
 iterator = BasicIterator(batch_size=16)
 iterator.index_with(vocab)
 
 num_steps = iterator.get_num_batches(train_ds)
+
+moving_average = None #ExponentialMovingAverage(model.named_parameters())
 
 trainer = Trainer(
     model=model,
@@ -443,8 +537,9 @@ trainer = Trainer(
     #should_log_learning_rate=True,
     #histogram_interval=1000,
     num_serialized_models_to_keep=1,
-    grad_norm=1,
+    grad_norm=5,
     shuffle=False,
+    moving_average=moving_average,
 )
 
 trainer.train()

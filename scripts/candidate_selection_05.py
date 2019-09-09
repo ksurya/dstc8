@@ -1,5 +1,3 @@
-import os
-
 import glob
 import os
 import json
@@ -21,6 +19,7 @@ from tabulate import tabulate
 from allennlp.data import Instance, Token
 from allennlp.data.fields import TextField, ListField, MetadataField, ArrayField, IndexField, Field, AdjacencyField
 from allennlp.data.dataset_readers import DatasetReader
+from allennlp.data.tokenizers import Token
 from allennlp.data.token_indexers import PretrainedBertIndexer, SingleIdTokenIndexer
 from allennlp.data.tokenizers.word_splitter import BertBasicWordSplitter
 from allennlp.data.vocabulary import Vocabulary
@@ -85,8 +84,8 @@ class Schema(object):
             result["intent_optvals"].append(list(intent["optional_slots"].values()))
 
         return result
-
-
+    
+    
 class Memory(object):
     
     def __init__(self, schema, services):
@@ -199,7 +198,6 @@ class DialogReader(DatasetReader):
                         active_slots = frame["state"]["slot_values"]
                         none_slots = set(all_slots) - set(active_slots)
                         
-                        # active slots
                         for slot, values in active_slots.items():
                             slotid = all_slots[slot]
                             assert slotid != -1
@@ -224,50 +222,68 @@ class DialogReader(DatasetReader):
                             )
                             yield self.text_to_instance(item)
                             
+#                         # none valued slots
+#                         for slot in none_slots:
+#                             if np.random.randn() > 0.5 and num_none_questions < 3:
+#                                 num_none_questions += 1
+#                                 slotid = all_slots[slot]
+#                                 assert slotid != -1
+#                                 key = (serv, slot) if all_slots_iscat[slotid] else "noncat"
+#                                 target_value = "NONE"
+#                                 item = dict(
+#                                     dialid=dial["dialogue_id"],
+#                                     turnid=turnid,
+#                                     usr_utter=usr_utter,
+#                                     sys_utter=sys_utter,
+#                                     serv=serv,
+#                                     serv_desc=sch["desc"],
+#                                     slot=slot,
+#                                     slot_desc=all_slots_desc[slotid],
+#                                     slot_iscat=all_slots_iscat[slotid],
+#                                     slot_val=target_value,
+#                                     intent=intent,
+#                                     intent_desc=intent_desc,
+#                                     intent_istrans=intent_istrans,
+#                                     memory=memory.get(key),
+#                                 )
+#                                 yield self.text_to_instance(item)
+                        
             
     def text_to_instance(self, item):
         fields = {}
+        SEP_token = Token("[SEP]")
         
-        # featurize query
-        query_tokens = []
-        query_type = []
+        # query part tokens
+        sys_utter_tokens = self.tokenizer.split_words(item["sys_utter"])
+        usr_utter_tokens = self.tokenizer.split_words(item["usr_utter"])
+        serv_desc_tokens = self.tokenizer.split_words(item["serv_desc"])
+        slot_desc_tokens = self.tokenizer.split_words(item["slot_desc"])
         
-        for index, field in enumerate(("sys_utter", "usr_utter", "serv_desc", "slot_desc")):
-            tokens = self.tokenizer.split_words(item[field])
-            query_tokens.extend(tokens)
-            query_type.extend([index + 1] * len(tokens))
+        # query part features
+        sys_utter = [] # [utter ; candidate-value-1 , ... ]
+        usr_utter = []
+        serv_desc = []
+        slot_desc = []
         
-        query_pos = list(range(1, len(query_tokens) + 1))
-        
-        fields["query"] = TextField(query_tokens, self.token_indexers)
-        fields["query_type"] = ArrayField(np.array(query_type))
-        fields["query_pos"] = ArrayField(np.array(query_pos))
-        
-        # featurize memory
-        mem_values = item["memory"]
-        mem_tokens = []
-        mem_pos = []
+        # memory features
         mem_loc = []
-        mem_type = []
         
-        for index, mem_val in enumerate(mem_values):
-            tokens = self.tokenizer.split_words(mem_val)
-            pos = np.array(range(1, len(tokens) + 1))
-            mtype = np.array([index + 1] * len(tokens))
-            istarget = int(mem_val == item["slot_val"])
-            
-            mem_tokens.append(TextField(tokens, self.token_indexers))
-            mem_pos.append(ArrayField(pos))
-            mem_type.append(ArrayField(mtype))
-            mem_loc.append(istarget)
-            
-        fields["memory"] = ListField(mem_tokens)
-        fields["memory_pos"] = ListField(mem_pos)
-        fields["memory_type"] = ListField(mem_type)
+        for index, mem_val in enumerate(item["memory"]):
+            mem_tokens = self.tokenizer.split_words(mem_val)
+            mem_loc.append(int(mem_val == item["slot_val"]))
+            sys_utter.append(TextField(sys_utter_tokens + [SEP_token] + mem_tokens, self.token_indexers))
+            usr_utter.append(TextField(usr_utter_tokens + [SEP_token] + mem_tokens, self.token_indexers))
+            serv_desc.append(TextField(serv_desc_tokens + [SEP_token] + mem_tokens, self.token_indexers))
+            slot_desc.append(TextField(slot_desc_tokens + [SEP_token] + mem_tokens, self.token_indexers))
+        
+        fields["sys_utter"] = ListField(sys_utter)
+        fields["usr_utter"] = ListField(usr_utter)
+        fields["serv_desc"] = ListField(serv_desc)
+        fields["slot_desc"] = ListField(slot_desc)
         fields["memory_loc"] = ArrayField(np.array(mem_loc), padding_value=-1)
 
         # positional fields
-        fields["turnid"] =  ArrayField(np.array(item["turnid"]))
+        fields["turnid"] =  ArrayField(np.array(item["turnid"]), padding_value=-1)
         
         # meta fields
         fields["id"] = MetadataField("{}/{}/{}/{}".format(item["dialid"], item["turnid"], item["serv"], item["slot"]))
@@ -278,23 +294,23 @@ class DialogReader(DatasetReader):
         fields["memory_values"] = MetadataField(item["memory"])
         
         return Instance(fields)
-
-
+    
+    
 train_schema = Schema("../data/train/schema.json")
 dev_schema = Schema("../data/dev/schema.json")
 
 
 # read full dataset
-reader = DialogReader(train_schema, limit=100)
+reader = DialogReader(train_schema, limit=float("inf"))
 train_ds = reader.read("../data/train/dialogues*.json")
 
-reader = DialogReader(dev_schema, limit=10)
+reader = DialogReader(dev_schema, limit=float("inf"))
 dev_ds = reader.read("../data/dev/dialogues*.json")
 
 vocab = Vocabulary.from_instances(train_ds + dev_ds)
 
 
-it = BasicIterator(batch_size=32)
+it = BasicIterator(batch_size=2)
 it.index_with(vocab)
 batch = next(iter(it(train_ds)))
 batch.keys()
@@ -306,30 +322,17 @@ for f in batch:
         print(f, "->", batch[f].shape)
     elif type(batch[f]) is dict and type(batch[f]["tokens"]) is torch.Tensor:
         print(f, "->", batch[f]["tokens"].shape)
-
-
+        
+        
 class CandidateSelector(Model):
     
     def __init__(self, vocab):
         super().__init__(vocab)
         # query encoder
-        self.emb = PretrainedBertEmbedder("/home/suryak/mtdnn/mt_dnn_models/pytorch_model.tar.gz", requires_grad=True)
+        self.emb = PretrainedBertEmbedder("bert-base-uncased", requires_grad=True)
         emb_dim = self.emb.get_output_dim()
         
-        # memory decoder
-        dec_layer = nn.TransformerDecoderLayer(emb_dim, 8)
-        self.dec = nn.TransformerDecoder(dec_layer, 6)
-        
-        #self.enc_dec = nn.Transformer(emb_dim, emb_dim)
-        
-        # final
-        self.final = nn.Linear(emb_dim, 1)
-        
-        # embeddings
-#         self.query_type_emb = nn.Embedding(10, emb_dim) # max query fields
-#         self.query_pos_emb = nn.Embedding(500, emb_dim) # max query length
-#         self.memory_pos_emb = nn.Embedding(500, emb_dim) # max total length of candidates
-#         self.memory_pos_emb = nn.Embedding(500, emb_dim) # max total length of candidates
+        self.final = nn.Linear(emb_dim * 4, 1)
         
         # metrics
         self.accuracy = BooleanAccuracy()
@@ -338,62 +341,38 @@ class CandidateSelector(Model):
         return {"acc": self.accuracy.get_metric(reset)}
     
     def encoder(self, batch):
-        query = self.emb(batch["query"]["tokens"], batch["query"]["tokens-offsets"]) # [batch, seq, emb]
-        #query_type = self.query_type_emb(batch["query_type"].long()) # [batch, seq, emb]
-        #query_pos = self.query_pos_emb(batch["query_pos"].long()) # [batch, seq, emb]
+        q1 = batch["sys_utter"] # [batch,memory,tokens]
+        q2 = batch["usr_utter"]
+        q3 = batch["serv_desc"]
+        q4 = batch["slot_desc"]
         
-        memory = self.emb(batch["memory"]["tokens"], batch["memory"]["tokens-offsets"]) # [batch, mem, seq, emb]
-        #memory_pos = self.memory_pos_emb(batch["memory_pos"].long()) # [batch, mem, seq, emb]
-        #memory_type = self.memory_pos_emb(batch["memory_type"].long()) # [batch, mem, seq, emb]
+        q1_enc = self.emb(q1["tokens"].flatten(0,1), q1["tokens-offsets"].flatten(0,1), q1["tokens-type-ids"].flatten(0,1))
+        q1_enc = q1_enc.view(list(q1["mask"].shape) + [-1])
+        q1_enc = q1_enc[:,:,0,:] # b,m,e
         
-        #enc_query = torch.cat((query, query_type, query_pos), -1)
-        #enc_memory = torch.cat((memory, memory_type, memory_pos), -1)
+        q2_enc = self.emb(q2["tokens"].flatten(0,1), q2["tokens-offsets"].flatten(0,1), q2["tokens-type-ids"].flatten(0,1))
+        q2_enc = q2_enc.view(list(q2["mask"].shape) + [-1])
+        q2_enc = q2_enc[:,:,0,:]
         
-        return query, memory
+        q3_enc = self.emb(q3["tokens"].flatten(0,1), q3["tokens-offsets"].flatten(0,1), q3["tokens-type-ids"].flatten(0,1))
+        q3_enc = q3_enc.view(list(q3["mask"].shape) + [-1])
+        q3_enc = q3_enc[:,:,0,:]
+        
+        q4_enc = self.emb(q4["tokens"].flatten(0,1), q4["tokens-offsets"].flatten(0,1), q4["tokens-type-ids"].flatten(0,1))
+        q4_enc = q4_enc.view(list(q4["mask"].shape) + [-1])
+        q4_enc = q4_enc[:,:,0,:]
+        
+        enc = torch.cat((q1_enc, q2_enc, q3_enc, q4_enc), dim=-1) # b,m,4e
+        
+        return enc
     
-    
-    def decoder(self, query, memory):
-        # query: encoder output, batch, seq, emb
-        # memory: decoder input, batch, mem, seq, emb
-        memory = memory.sum(2)
-        
-        query = query.permute(1,0,2) # seq, batch, emb
-        memory = memory.permute(1,0,2)
-        
-        x = self.dec(memory, query)
-        #x = self.enc_dec(query, memory)
-        x = x.permute(1,0,2)
-        
-        return x
-    
-    def mse_loss(self, decoded, target):
-        # decoded: batch, mem, emb 
-        # tgt: batch, mem
-        predicted = F.softmax(self.final(decoded).squeeze(-1), -1) # batch, mem
-        
-        # loss
-        mask = (target != -1).float()
-        loss = F.mse_loss(predicted * mask, target * mask).unsqueeze(0)
+    def compute_loss(self, logits, target):
+        # logits: batch, mem
+        # target: batch, mem
+        loss = F.cross_entropy(logits, target.argmax(-1), ignore_index=-1).unsqueeze(0)
         
         # metric
-        predicted_loc = predicted.argmax(-1)
-        target_loc = target.argmax(-1)
-
-        mask_loc = mask[torch.arange(mask.shape[0]), target_loc]
-        self.accuracy(predicted_loc, target_loc, mask_loc.long())
-    
-        return loss, predicted_loc, target_loc
-    
-    def bce_loss(self, decoded, target):
-        # decoded: batch, mem, emb
-        # tgt: batch, mem
-        predicted = self.final(decoded).squeeze(-1)
-        
-        # loss
-        loss = F.cross_entropy(predicted, target.argmax(-1), ignore_index=-1).unsqueeze(0)
-        
-        # metric
-        predicted_loc = predicted.argmax(-1)
+        predicted_loc = logits.argmax(-1)
         target_loc = target.argmax(-1)
 
         mask = (target != -1).float()
@@ -403,34 +382,32 @@ class CandidateSelector(Model):
         return loss, predicted_loc, target_loc
     
     def forward(self, **batch):
-        query, memory = self.encoder(batch)
-        query = query.detach()
+        enc = self.encoder(batch) # b,m,4e
+        logits = self.final(enc).squeeze(-1) # bm
         
-        decoded = self.decoder(query, memory) # batch, mem, emb
-
-        target = batch["memory_loc"] # [batch, mem]
-        loss, predicted_loc, target_loc = self.bce_loss(decoded, target)
+        target = batch["memory_loc"] # bm
+        loss, pred_loc, target_loc = self.compute_loss(logits, target)
         
         output = dict(
             loss=loss,
-            pred=predicted_loc,
+            pred=pred_loc,
             target=target_loc,
         )
         
         return output
-
-
-#%%
-allen_device=2
-torch_device=2
+    
+    
+allen_device=[0,1]
+torch_device=0
 
 model = CandidateSelector(vocab).to(torch_device)
-optimizer = optim.Adam(model.parameters(), lr=3e-5)
+optimizer = optim.Adam(model.parameters(), lr=1e-4)
 
-iterator = BasicIterator(batch_size=16)
+iterator = BasicIterator(batch_size=2)
 iterator.index_with(vocab)
 
 num_steps = iterator.get_num_batches(train_ds)
+lr_scheduler = None #SlantedTriangular(optimizer, 3, num_steps)
 
 trainer = Trainer(
     model=model,
@@ -439,16 +416,16 @@ trainer = Trainer(
     train_dataset=train_ds,
     num_epochs=3,
     cuda_device=allen_device,
-    serialization_dir="../results/7",
+    #learning_rate_scheduler=lr_scheduler,
+    serialization_dir="../results/8",
     #should_log_learning_rate=True,
-    #histogram_interval=1000,
+    #histogram_interval=50,
     num_serialized_models_to_keep=1,
-    grad_norm=1,
+    grad_norm=5,
     shuffle=False,
 )
 
 trainer.train()
-
 
 def predictor(model, test_ds, device):
     results = defaultdict(OrderedDict)
@@ -480,7 +457,6 @@ def predictor(model, test_ds, device):
     
     return results
 
-#%%
 def results_to_dial(dev_ds, results):
     # index..
     index = {}
@@ -541,24 +517,24 @@ def results_to_dial(dev_ds, results):
     
     return list(dialogs.values())
 
-#%%
-dev_results = predictor(model, dev_ds, torch_device)
+
 
 raw_dev_ds = []
 for fname in sorted(glob.glob("../data/dev/dialogues*.json")):
     with open(fname) as f:
         ds_list = json.load(f)
     raw_dev_ds.extend(ds_list)
+    
 
-dial_results = results_to_dial(raw_dev_ds, dev_results)
+de_results = predictor(model, dev_ds, torch_device)
 
-with open("../out/out2-dev/dialogues.json", "w") as f:
-    json.dump(dial_results, f, indent=2)
+de_dial_results = results_to_dial(raw_dev_ds, de_results)
 
-print("Saved dev results")
+with open("../out/out3-dev/dialogues.json", "w") as f:
+    json.dump(de_dial_results, f, indent=2)
 
-#%%
-train_results = predictor(model, train_ds, torch_device)
+print("completed predictions on dev dataset")
+    
 
 raw_train_ds = []
 for fname in sorted(glob.glob("../data/train/dialogues*.json")):
@@ -566,22 +542,12 @@ for fname in sorted(glob.glob("../data/train/dialogues*.json")):
         ds_list = json.load(f)
     raw_train_ds.extend(ds_list)
 
+tr_results = predictor(model, train_ds, torch_device)
 
-#%%
-tr_dial_results = results_to_dial(raw_train_ds, train_results)
+tr_dial_results = results_to_dial(raw_train_ds, tr_results)
 
-with open("../out/out2-train/dialogues.json", "w") as f:
+with open("../out/out3-train/dialogues.json", "w") as f:
     json.dump(tr_dial_results, f, indent=2)
 
-print("Saved dev results")
+
 print("done")
-
-#%%
-# eval command
-#
-# >>> DEV
-# python -m schema_guided_dst.evaluate --dstc8_data_dir data --prediction_dir out-dev/ --eval_set dev --output_metric_file out-dev/eval.json
-#
-# >>> TRAIN
-# python -m schema_guided_dst.evaluate --dstc8_data_dir data --prediction_dir out-train/ --eval_set train --output_metric_file out-train/eval.json
-
