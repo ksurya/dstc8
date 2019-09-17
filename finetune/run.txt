@@ -1,3 +1,19 @@
-python pregenerate_training_data.py --train_corpus set-all/train.txt --bert_model bert-base-uncased --do_lower_case --output_dir training_all/ --epochs_to_generate 3 --short_seq_prob 0.9
+training_all_1
+    - can't recall
 
-python finetune_on_pregenerated.py --pregenerated_data training_all2/ --bert_model bert-base-uncased --do_lower_case --output_dir model_all2/ --epochs=3
+training_all_2
+    - probably with no changes
+    - contains docs of size 1
+
+training_all_3
+    - sentence A
+        - fixed history 5
+        - fixed overlap 3
+    - sentence B
+        - only one utterance
+        - 0.5 prob. picked at random from other documents
+        - 0.5 * 0.3 prob. picked at random from past/future of current document
+
+python pregenerate_training_data.py --train_corpus set-all/train.txt --bert_model bert-base-uncased --do_lower_case --output_dir training_all_3/ --epochs_to_generate 3 --short_seq_prob 0.9
+
+python finetune_on_pregenerated.py --pregenerated_data training_all_3/ --bert_model bert-base-uncased --do_lower_case --output_dir model_all_3/ --epochs=3
